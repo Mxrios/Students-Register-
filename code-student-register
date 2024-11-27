@@ -1,0 +1,862 @@
+import sqlite3
+import tkinter as tk
+from tkinter import messagebox, ttk
+from datetime import datetime
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import pyotp
+from fpdf import FPDF  #exportar treeviews a pdf
+from openpyxl import Workbook
+from tkinter import filedialog
+from datetime import datetime, timedelta 
+from tkcalendar import DateEntry
+from tkinter import END, Entry
+
+# Conexión a la base de datos
+conexion = sqlite3.connect('registro_horas_ult.db')
+cursor = conexion.cursor()
+
+# Crear las tablas si no existen
+cursor.execute(''' 
+CREATE TABLE IF NOT EXISTS estudiantes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cedula TEXT NOT NULL,
+    nombre TEXT NOT NULL,
+    correo TEXT NOT NULL,
+    horas_semanales INTEGER NOT NULL 
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS asistencia (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    estudiante_id INTEGER,
+    anio INTEGER,
+    mes INTEGER,
+    semana INTEGER,
+    dia TEXT,
+    hora_ingreso TEXT,
+    hora_salida TEXT,
+    estado TEXT,
+    motivo TEXT,
+    fecha DATE NOT NULL,
+    horas_trabajadas REAL DEFAULT 0,
+    horas_acumuladas REAL DEFAULT 0,
+    FOREIGN KEY (estudiante_id) REFERENCES estudiantes (id) ON DELETE CASCADE
+)
+''')
+
+conexion.commit()
+
+#Parte de funciones
+def act_lista_estudiantes():
+    lista_estudiantes.delete(*lista_estudiantes.get_children())  # Limpiar el Treeview antes de actualizarlo
+
+    cursor.execute('SELECT id, cedula, nombre, correo, horas_semanales FROM estudiantes')
+    estudiantes = cursor.fetchall()
+
+    for estudiante in estudiantes:
+        
+        lista_estudiantes.insert('', 'end', values=(estudiante[1], estudiante[2], estudiante[3], estudiante[4], estudiante[0]))
+
+def agregar_estudiante():
+    cedula = entrada_cedula.get()
+    nombre = entrada_nombre.get()
+    correo = entrada_correo.get() 
+    horas_semanales = entrada_horas_semanales.get() 
+    if cedula and nombre and correo and horas_semanales:  
+        cursor.execute('INSERT INTO estudiantes (cedula, nombre, correo, horas_semanales) VALUES (?, ?, ?, ?)', 
+                       (cedula, nombre, correo, horas_semanales))
+        conexion.commit()
+        act_lista_estudiantes()
+        entrada_cedula.delete(0, tk.END)
+        entrada_nombre.delete(0, tk.END)
+        entrada_correo.delete(0, tk.END)
+        entrada_horas_semanales.delete(0, tk.END)  
+    else:
+        messagebox.showwarning("Advertencia", "Por favor, completa todos los campos.")
+
+
+def eliminar_estudiante():
+    try:
+        
+        seleccion = lista_estudiantes.selection()[0]  
+        estudiante = lista_estudiantes.item(seleccion, 'values')  
+
+        
+        estudiante_id = estudiante[-1]  
+
+        
+        cursor.execute('DELETE FROM estudiantes WHERE id = ?', (estudiante_id,))
+        conexion.commit()
+
+        
+        act_lista_estudiantes()
+
+    except IndexError:
+        messagebox.showwarning("Advertencia", "Selecciona un estudiante para eliminar.")
+    except sqlite3.Error as e:
+        messagebox.showerror("Error de base de datos", str(e))
+
+
+
+def enviar_correo(correo, estado, motivo):
+    
+    sender_email = "registroasistenciaestudiantil@gmail.com"  
+    sender_password = "zmlh kmvd icrt rrpu"  
+    
+
+    fecha_actual = datetime.now().strftime("%Y-%m-%d") 
+
+    
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = correo
+    msg['Subject'] = "Reporte de Asistencia"
+    body = f"Estimado estudiante,\n\nSe ha registrado su ausencia el {fecha_actual}.\n\nEstado: {estado}\nMotivo: {motivo}\n\nSaludos."
+    msg.attach(MIMEText(body, 'plain'))
+
+    
+    with smtplib.SMTP('smtp.gmail.com', 587) as server:
+        server.starttls() 
+        server.login(sender_email, sender_password)
+        server.send_message(msg)
+        
+def formatear_hora(event, entry_widget):
+    """Función para colocar el formato HH:MM cuando el campo de hora está vacío."""
+    if entry_widget.get() == "":
+        entry_widget.insert(0, "HH:MM")
+
+def validar_hora(event, entry_widget):
+    """Valida que solo se puedan ingresar horas en el formato HH:MM y no más de 4 caracteres."""
+    valor = entry_widget.get()
+    if len(valor) > 5:  # Asegurarse de que no exceda 5 caracteres (HH:MM)
+        entry_widget.delete(5, END)
+    if len(valor) == 2 and valor[1] != ":":  # Insertar ':' automáticamente después de las dos primeras cifras
+        entry_widget.insert(2, ":")
+
+from datetime import datetime, date
+
+
+
+# Función para ver la asistencia del estudiante
+def ver_asistencia(estudiante_id=None, anio=None, semana=None, horas_semanales=None):
+    try:
+        if estudiante_id is None:
+            estudiante_id = entrada_id_ver_asistencia.get()
+        if anio is None:
+            anio = int(selected_ano_ver_asistencia.get())
+
+        treeview_asistencia.delete(*treeview_asistencia.get_children())
+        cursor.execute('''SELECT horas_semanales FROM estudiantes WHERE id = ?''', (estudiante_id,))
+        horas_semanales_estudiante = cursor.fetchone()[0]
+
+        cursor.execute('''
+            SELECT id, mes, semana, dia, hora_ingreso, hora_salida, estado, motivo, fecha, horas_trabajadas, horas_acumuladas
+            FROM asistencia
+            WHERE estudiante_id = ? AND anio = ?
+            ORDER BY mes, semana, dia
+        ''', (estudiante_id, anio))
+        registros = cursor.fetchall()
+
+        dias_semana_espanol = {
+            "Monday": "Lunes",
+            "Tuesday": "Martes",
+            "Wednesday": "Miércoles",
+            "Thursday": "Jueves",
+            "Friday": "Viernes",
+            "Saturday": "Sábado",
+            "Sunday": "Domingo"
+        }
+
+        asistencia_data = {mes: {} for mes in range(1, 13)}
+
+        for registro in registros:
+            id, mes, semana, dia, hora_ingreso, hora_salida, estado, motivo, fecha, horas_trabajadas, horas_acumuladas = registro
+            fecha_obj = datetime.strptime(fecha, "%Y-%m-%d")
+            dia_semana_espanol = dias_semana_espanol[fecha_obj.strftime("%A")]
+
+            if semana not in asistencia_data[mes]:
+                asistencia_data[mes][semana] = {
+                    'dias': [],
+                    'horas_trabajadas_semana': 0,
+                    'horas_acumuladas_semana': 0
+                }
+
+            asistencia_data[mes][semana]['dias'].append({
+                'dia': dia_semana_espanol,
+                'fecha': fecha,
+                'hora_ingreso': hora_ingreso,
+                'hora_salida': hora_salida,
+                'estado': estado,
+                'motivo': motivo,
+                'horas_trabajadas': horas_trabajadas
+            })
+
+            asistencia_data[mes][semana]['horas_trabajadas_semana'] += convertir_a_horas_decimal(horas_trabajadas)
+            asistencia_data[mes][semana]['horas_acumuladas_semana'] += convertir_a_horas_decimal(horas_acumuladas)
+
+        for mes in range(1, 13):
+            mes_id = f"mes_{mes}"
+            treeview_asistencia.insert('', 'end', mes_id, text=f"Mes {mes}")
+            if mes in asistencia_data:
+                for semana in asistencia_data[mes]:
+                    semana_id = f"{mes_id}_semana_{semana}"
+                    treeview_asistencia.insert(mes_id, 'end', semana_id, text=f"Semana {semana}")
+
+                    horas_trabajadas_semana = asistencia_data[mes][semana]['horas_trabajadas_semana']
+                    horas_semanales_estudiante = float(horas_semanales_estudiante)
+                    horas_trabajadas_semana = float(horas_trabajadas_semana)
+
+                    horas_acumuladas_semana = max(0, horas_trabajadas_semana - horas_semanales_estudiante)
+                    cursor.execute('''
+                        UPDATE asistencia
+                        SET horas_acumuladas = ?
+                        WHERE estudiante_id = ? AND anio = ? AND semana = ?
+                    ''', (horas_acumuladas_semana, estudiante_id, anio, semana))
+                    conexion.commit()
+
+                    for dia_data in asistencia_data[mes][semana]['dias']:
+                        treeview_asistencia.insert(
+                            semana_id, 'end', text=dia_data['dia'],
+                            values=(dia_data['fecha'], dia_data['hora_ingreso'], dia_data['hora_salida'],
+                                    dia_data['estado'], dia_data['motivo'], dia_data['horas_trabajadas'])
+                        )
+
+                    treeview_asistencia.insert(
+                        semana_id, 'end', text="Total Semana",
+                        values=("", "", "", "", "Total", f"{horas_trabajadas_semana:.2f}")
+                    )
+                    treeview_asistencia.insert(
+                        semana_id, 'end', text="Acumuladas",
+                        values=("", "", "", "", "Acumuladas", f"{horas_acumuladas_semana:.2f}")
+                    )
+            else:
+                treeview_asistencia.insert(mes_id, 'end', text="Sin registros", values=("N/A", "N/A", "N/A", "N/A", "N/A", "N/A"))
+
+    except ValueError:
+        messagebox.showerror("Error", "Por favor, ingrese un ID de estudiante y un año válidos.")
+    except sqlite3.Error as e:
+        messagebox.showerror("Error de base de datos", str(e))
+    except Exception as e:
+        messagebox.showerror("Error inesperado", str(e))
+
+
+# Función corregida para registrar asistencia
+def registrar_asistencia():
+    try:
+        estudiante_id = entrada_id_asistencia.get()
+        fecha = entrada_fecha.get_date()  # Obtener la fecha del DateEntry como un objeto datetime.date
+        
+        if isinstance(fecha, datetime):
+            # Asegurarnos de que fecha sea un objeto de tipo date
+            fecha = fecha.date()
+
+        anio, mes, dia = fecha.year, fecha.month, fecha.day
+        semana = fecha.isocalendar()[1]  # Obtener la semana ISO
+        estado = selected_estado.get()
+        motivo = entrada_motivo.get()
+
+        # Verificar si el estudiante existe y obtener horas_semanales
+        cursor.execute('SELECT horas_semanales FROM estudiantes WHERE id = ?', (estudiante_id,))
+        resultado = cursor.fetchone()
+        if resultado is None:
+            messagebox.showerror("Error", "El ID del estudiante no existe.")
+            return
+        horas_semanales = resultado[0]
+
+        if estado.lower() in ["ausente", "libre", "enfermo", "permiso"]:
+            hora_ingreso, hora_salida, horas_trabajadas_total = None, None, 0
+        else:
+            # Validar y calcular horas trabajadas
+            hora_ingreso = entrada_hora_ingreso.get()
+            hora_salida = entrada_hora_salida.get()
+
+            try:
+                ingreso_dt = datetime.strptime(hora_ingreso, "%H:%M")
+                salida_dt = datetime.strptime(hora_salida, "%H:%M")
+            except ValueError:
+                messagebox.showerror("Error", "El formato de las horas debe ser HH:MM.")
+                return
+
+            horas_trabajadas = salida_dt - ingreso_dt
+            if salida_dt > datetime.strptime("12:59", "%H:%M"):
+                horas_trabajadas -= timedelta(hours=1)
+            horas_trabajadas_total = max(0, horas_trabajadas.total_seconds() / 3600)
+
+        # Verificar si ya existe un registro para la fecha
+        cursor.execute('''
+            SELECT COUNT(*) FROM asistencia 
+            WHERE estudiante_id = ? AND anio = ? AND mes = ? AND semana = ? AND dia = ?
+        ''', (estudiante_id, anio, mes, semana, dia))
+        if cursor.fetchone()[0] > 0:
+            messagebox.showwarning("Advertencia", "Ya existe un registro para este día.")
+            return
+
+        # Insertar registro en la base de datos
+        cursor.execute('''
+            INSERT INTO asistencia (estudiante_id, anio, mes, semana, dia, hora_ingreso, hora_salida, estado, motivo, fecha, horas_trabajadas) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (estudiante_id, anio, mes, semana, dia, hora_ingreso, hora_salida, estado, motivo, fecha, horas_trabajadas_total))
+        conexion.commit()
+
+        # Actualizar horas acumuladas
+        ver_asistencia(estudiante_id, anio, semana, horas_semanales)
+
+        if estado.lower() == "ausente":
+            cursor.execute('SELECT correo FROM estudiantes WHERE id = ?', (estudiante_id,))
+            correo_estudiante = cursor.fetchone()
+            if correo_estudiante:
+                enviar_correo(correo_estudiante[0], estado, motivo)
+
+        messagebox.showinfo("Éxito", "Asistencia registrada exitosamente.")
+    except ValueError:
+        messagebox.showerror("Error", "Por favor, ingrese valores válidos.")
+    except sqlite3.Error as e:
+        messagebox.showerror("Error de base de datos", str(e))
+    except Exception as e:
+        messagebox.showerror("Error inesperado", str(e))
+
+def transferir_horas():
+    try:
+        estudiante_id = entrada_id_transferencia.get()
+        anio = int(selected_ano_transferencia.get())
+        semana_origen = int(entrada_semana_origen.get())
+        semana_destino = int(entrada_semana_destino.get())
+        
+        # Verificar si el campo de horas a transferir tiene un valor válido
+        try:
+            horas_a_transferir = float(entrada_horas_transferir.get())
+        except ValueError:
+            messagebox.showerror("Error", "Por favor, ingresa un valor numérico válido para las horas a transferir.")
+            return
+
+        if horas_a_transferir <= 0:
+            messagebox.showerror("Error", "Las horas a transferir deben ser un valor positivo.")
+            return
+        
+        # Verificar horas acumuladas en la semana de origen
+        cursor.execute('''SELECT horas_acumuladas FROM asistencia
+                          WHERE estudiante_id = ? AND anio = ? AND semana = ?''', (estudiante_id, anio, semana_origen))
+        resultado = cursor.fetchone()
+
+        if resultado and resultado[0] is not None:
+            horas_acumuladas_origen = float(resultado[0])
+        else:
+            messagebox.showerror("Error", "No se encontraron horas acumuladas en la semana de origen.")
+            return
+
+        if horas_a_transferir > horas_acumuladas_origen:
+            messagebox.showerror("Error", "No tienes suficientes horas acumuladas en la semana de origen.")
+            return
+
+        # Actualizar horas acumuladas en la semana de origen
+        nuevas_horas_acumuladas_origen = horas_acumuladas_origen - horas_a_transferir
+        cursor.execute('''UPDATE asistencia
+                          SET horas_acumuladas = ?
+                          WHERE estudiante_id = ? AND anio = ? AND semana = ?''', 
+                       (nuevas_horas_acumuladas_origen, estudiante_id, anio, semana_origen))
+
+        # Verificar horas acumuladas en la semana de destino
+        cursor.execute('''SELECT horas_acumuladas FROM asistencia
+                          WHERE estudiante_id = ? AND anio = ? AND semana = ?''', 
+                       (estudiante_id, anio, semana_destino))
+        resultado_destino = cursor.fetchone()
+
+        if resultado_destino:
+            horas_acumuladas_destino = resultado_destino[0]
+        else:
+            horas_acumuladas_destino = 0
+
+        # Actualizar horas acumuladas en la semana de destino
+        nuevas_horas_acumuladas_destino = horas_acumuladas_destino + horas_a_transferir
+        cursor.execute('''UPDATE asistencia
+                          SET horas_acumuladas = ?
+                          WHERE estudiante_id = ? AND anio = ? AND semana = ?''', 
+                       (nuevas_horas_acumuladas_destino, estudiante_id, anio, semana_destino))
+
+        # Confirmar cambios
+        conexion.commit()
+        messagebox.showinfo("Éxito", f"{horas_a_transferir} horas han sido transferidas correctamente.")
+        actualizar_treeview_asistencia(estudiante_id, anio)  # Actualizar el Treeview de asistencia
+
+    except Exception as e:
+        messagebox.showerror("Error", f"No se pudo realizar la transferencia: {str(e)}")
+
+
+def actualizar_treeview_asistencia(estudiante_id, anio):
+    # Limpiar el Treeview antes de actualizar
+    for item in treeview_asistencia.get_children():
+        treeview_asistencia.delete(item)
+    
+    # Consultar y actualizar los datos de asistencia con las nuevas horas
+    cursor.execute(''' 
+        SELECT mes, semana, dia, hora_ingreso, hora_salida, estado, motivo, horas_trabajadas, horas_acumuladas
+        FROM asistencia
+        WHERE estudiante_id = ? AND anio = ?
+        ORDER BY mes, semana, dia
+    ''', (estudiante_id, anio))
+
+    registros = cursor.fetchall()
+    
+    for registro in registros:
+        mes, semana, dia, hora_ingreso, hora_salida, estado, motivo, horas_trabajadas, horas_acumuladas = registro
+        # Insertar los registros en el Treeview
+        treeview_asistencia.insert("", "end", text=f"Semana {semana} Día {dia}",
+                                   values=(f"{anio}-{mes:02d}-{dia:02d}", hora_ingreso, hora_salida, estado, motivo, horas_trabajadas))
+
+
+
+# Modificar eliminar_asistencia para usar id
+def eliminar_asistencia():
+    try:
+        selected_item = treeview_asistencia.selection()[0]  
+        item_values = treeview_asistencia.item(selected_item, 'values')
+        
+        # Obtenemos id del registro
+        id_asistencia = item_values[0]  
+
+        cursor.execute('DELETE FROM asistencia WHERE id = ?', (id_asistencia,))
+        conexion.commit()
+
+        # Eliminar el elemento del Treeview
+        treeview_asistencia.delete(selected_item)
+        messagebox.showinfo("Éxito", "Asistencia eliminada exitosamente.")
+
+    except IndexError:
+        messagebox.showerror("Error", "No se ha seleccionado ningún ítem.")
+    except sqlite3.Error as e:
+        messagebox.showerror("Error de base de datos", str(e))
+    except Exception as e:
+        messagebox.showerror("Error inesperado", str(e))
+
+def actualizar_asistencia():
+    try:
+        selected_item = treeview_asistencia.selection()[0]  
+        item_values = treeview_asistencia.item(selected_item, 'values')
+        
+        estudiante_id = item_values[1]  
+        fecha = item_values[0] 
+
+        nuevo_ingreso = entrada_hora_ingreso.get()
+        nueva_salida = entrada_hora_salida.get()
+        nuevo_estado = selected_estado.get()
+        motivo = entrada_motivo.get()
+
+        cursor.execute(''' 
+            UPDATE asistencia
+            SET hora_ingreso = ?, hora_salida = ?, estado = ?, motivo = ?
+            WHERE fecha = ? AND estudiante_id = ?
+        ''', (nuevo_ingreso, nueva_salida, nuevo_estado, motivo, fecha, estudiante_id))
+        conexion.commit()
+
+        
+        treeview_asistencia.item(selected_item, values=(fecha, nuevo_ingreso, nueva_salida, nuevo_estado, motivo))
+        messagebox.showinfo("Éxito", "Asistencia actualizada exitosamente.")
+
+    except IndexError:
+        messagebox.showerror("Error", "No se ha seleccionado ningún ítem.")
+    except sqlite3.Error as e:
+        messagebox.showerror("Error de base de datos", str(e))
+    except Exception as e:
+        messagebox.showerror("Error inesperado", str(e))
+
+# Lista de días en español
+dias_en_espanol = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
+# Función para mostrar las horas trabajadas y acumuladas
+def convertir_a_horas_decimal(hora_str):
+    """Convierte un string de horas en formato HH:MM a un valor decimal de horas."""
+    try:
+        # Si ya es un número, simplemente lo retornamos
+        if isinstance(hora_str, (int, float)):
+            return float(hora_str)
+        
+        # Si es una cadena de texto, intentamos convertirlo en formato HH:MM
+        horas, minutos = map(int, hora_str.split(":"))
+        return horas + minutos / 60.0
+    except ValueError:
+        return 0  # Si el formato es incorrecto o no es convertible, retornamos 0
+
+# Interfaz gráfica
+ventana = tk.Tk()
+ventana.title("Registro de Horas de Estudiantes")
+ventana.geometry("1100x700")
+
+widget = ttk.Style()
+widget.tk.call("source", "azure.tcl")
+widget.tk.call("set_theme", "dark")
+
+notebook = ttk.Notebook(ventana)
+notebook.pack(fill='both', expand=True)
+
+# Crear pestañas en el Notebook
+pestana_estudiante = ttk.Frame(notebook)
+notebook.add(pestana_estudiante, text='Añadir Estudiantes')
+
+
+pestana_asistencia = ttk.Frame(notebook)
+notebook.add(pestana_asistencia, text='Registrar Asistencia')
+
+pestana_ver_asistencia = ttk.Frame(notebook)
+notebook.add(pestana_ver_asistencia, text='Ver Asistencia')
+
+# --- Sección de Añadir Estudiantes --- 
+etiqueta_cedula = tk.Label(pestana_estudiante, text="Cédula:")
+etiqueta_cedula.grid(row=0, column=0, padx=5, pady=5)
+
+entrada_cedula = ttk.Entry(pestana_estudiante)
+entrada_cedula.grid(row=0, column=1, padx=5, pady=5)
+
+etiqueta_nombre = tk.Label(pestana_estudiante, text="Nombre:")
+etiqueta_nombre.grid(row=1, column=0, padx=5, pady=5)
+
+entrada_nombre = ttk.Entry(pestana_estudiante)
+entrada_nombre.grid(row=1, column=1, padx=5, pady=5)
+
+# Correo
+label_correo = tk.Label(pestana_estudiante, text="Correo electrónico:")
+label_correo.grid(row=2, column=0, padx=10, pady=5)
+
+
+entrada_correo = ttk.Entry(pestana_estudiante)
+entrada_correo.grid(row=2, column=1, padx=10, pady=5)
+
+#Horas semanales
+label_horas_semanales = tk.Label(pestana_estudiante, text="Horas semanales:")
+label_horas_semanales.grid(row=3, column=0, padx=10, pady=5)
+
+entrada_horas_semanales = ttk.Entry(pestana_estudiante)
+entrada_horas_semanales.grid(row=3, column=1, padx=10, pady=5)
+
+# Botón para agregar estudiante
+boton_agregar = ttk.Button(pestana_estudiante, text="Agregar Estudiante", command=agregar_estudiante)
+boton_agregar.grid(row=4, column=0, columnspan=2, pady=5)
+
+# Botón para eliminar estudiante
+boton_eliminar = ttk.Button(pestana_estudiante, text="Eliminar Estudiante", command=eliminar_estudiante)
+boton_eliminar.grid(row=5, column=0, columnspan=2, pady=5)
+
+# Treeview
+lista_estudiantes = ttk.Treeview(pestana_estudiante, columns=("Cedula", "Nombre", "Correo", "Horas", "ID"), show="headings", height=10)
+lista_estudiantes.grid(row=6, column=0, columnspan=2, pady=5, sticky='nsew')
+
+# Encabezados
+lista_estudiantes.heading("Cedula", text="Cédula")
+lista_estudiantes.heading("Nombre", text="Nombre")
+lista_estudiantes.heading("Correo", text="Correo")
+lista_estudiantes.heading("Horas", text="Horas Semanales")  
+lista_estudiantes.heading("ID", text="ID")
+
+# Columnas
+lista_estudiantes.column("Cedula", width=150)
+lista_estudiantes.column("Nombre", width=200)
+lista_estudiantes.column("Correo", width=200)
+lista_estudiantes.column("Horas", width=100)  
+lista_estudiantes.column("ID", width=80)
+
+# Scrollbar vertical
+scrollbar = ttk.Scrollbar(pestana_estudiante, orient="vertical", command=lista_estudiantes.yview)
+
+
+lista_estudiantes.configure(yscroll=scrollbar.set)
+
+
+scrollbar.grid(row=6, column=2, sticky='ns', padx=5, pady=5)
+
+
+act_lista_estudiantes()
+
+# --- Sección de Registrar Asistencia ---
+etiqueta_id_asistencia = tk.Label(pestana_asistencia, text="ID Estudiante:")
+etiqueta_id_asistencia.grid(row=0, column=0, padx=5, pady=5)
+
+entrada_id_asistencia = ttk.Entry(pestana_asistencia)
+entrada_id_asistencia.grid(row=0, column=1, padx=5, pady=5)
+
+# Cambiar la entrada de fecha a DateEntry
+label_fecha = ttk.Label(pestana_asistencia, text="Fecha:")
+label_fecha.grid(row=5, column=0, padx=5, pady=5)
+
+entrada_fecha = DateEntry(pestana_asistencia, date_pattern='y-mm-dd')  # Ajuste del patrón de fecha
+entrada_fecha.grid(row=5, column=1, padx=5, pady=5)
+
+def configurar_hora(entry):
+    """Configura la entrada para mostrar el formato de hora hh:mm."""
+    entry.insert(0, "HH:MM")
+    entry.selection_clear(0, tk.END)  # Limpiar la selección
+
+def mover_cursor(event):
+    """Mueve el cursor a la posición correcta después de ingresar la hora."""
+    if len(event.widget.get()) == 2:  # Si se han ingresado dos caracteres (HH)
+        event.widget.insert(tk.END, ":")  # Agregar dos puntos
+        event.widget.selection_clear(0, tk.END)  # Limpiar la selección
+        event.widget.icursor(tk.END)  # Colocar el cursor al final
+
+etiqueta_hora_ingreso = tk.Label(pestana_asistencia, text="Hora Ingreso:")
+etiqueta_hora_ingreso.grid(row=6, column=0, padx=5, pady=5)
+
+entrada_hora_ingreso = ttk.Entry(pestana_asistencia, width=7)
+entrada_hora_ingreso.grid(row=6, column=1, padx=5, pady=5)
+
+etiqueta_hora_salida = tk.Label(pestana_asistencia, text="Hora Salida:")
+etiqueta_hora_salida.grid(row=7, column=0, padx=5, pady=5)
+
+entrada_hora_salida = ttk.Entry(pestana_asistencia, width=7)
+entrada_hora_salida.grid(row=7, column=1, padx=5, pady=5)
+
+entrada_hora_ingreso.bind("<FocusIn>", lambda event: formatear_hora(event, entrada_hora_ingreso))
+entrada_hora_salida.bind("<FocusIn>", lambda event: formatear_hora(event, entrada_hora_salida))
+
+entrada_hora_ingreso.bind("<KeyRelease>", lambda event: validar_hora(event, entrada_hora_ingreso))
+entrada_hora_salida.bind("<KeyRelease>", lambda event: validar_hora(event, entrada_hora_salida))
+
+etiqueta_estado = tk.Label(pestana_asistencia, text="Estado:")
+etiqueta_estado.grid(row=8, column=0, padx=5, pady=5)
+
+selected_estado = tk.StringVar(value='Presente')
+estado_combo = ttk.Combobox(pestana_asistencia, textvariable=selected_estado, values=["Presente", "Ausente", "Libre", "Enfermo", "Permiso"], state='readonly')
+estado_combo.grid(row=8, column=1, padx=5, pady=5)
+
+etiqueta_motivo = tk.Label(pestana_asistencia, text="Motivo (si aplica):")
+etiqueta_motivo.grid(row=9, column=0, padx=5, pady=5)
+
+entrada_motivo = ttk.Entry(pestana_asistencia)
+entrada_motivo.grid(row=9, column=1, padx=5, pady=5)
+
+boton_registrar_asistencia = ttk.Button(pestana_asistencia, text="Registrar Asistencia", command=registrar_asistencia)
+boton_registrar_asistencia.grid(row=10, column=1, padx=5, pady=5)
+
+# --- Sección de Ver Asistencia ---
+etiqueta_id_ver_asistencia = tk.Label(pestana_ver_asistencia, text="ID Estudiante:")
+etiqueta_id_ver_asistencia.grid(row=0, column=0, padx=5, pady=5)
+
+entrada_id_ver_asistencia = ttk.Entry(pestana_ver_asistencia)  
+entrada_id_ver_asistencia.grid(row=0, column=1, padx=5, pady=5)
+
+etiqueta_ano_ver_asistencia = tk.Label(pestana_ver_asistencia, text="Año:")
+etiqueta_ano_ver_asistencia.grid(row=1, column=0, padx=5, pady=5)
+
+selected_ano_ver_asistencia = tk.StringVar(value='2024') 
+ano_combo = ttk.Combobox(pestana_ver_asistencia, textvariable=selected_ano_ver_asistencia, 
+                         values=list(range(2020, 2031)), state='readonly') 
+ano_combo.grid(row=1, column=1, padx=5, pady=5)
+
+boton_ver_asistencia = ttk.Button(pestana_ver_asistencia, text="Ver Asistencia", command=ver_asistencia)
+boton_ver_asistencia.grid(row=2, column=0, columnspan=2, pady=5)
+
+# Treeview
+treeview_asistencia = ttk.Treeview(pestana_ver_asistencia, columns=("Fecha", "Hora Ingreso", "Hora Salida", "Estado", "Motivo", "Horas Trabajadas")
+)
+treeview_asistencia.heading("#0", text="  Día", anchor="center")
+treeview_asistencia.heading("Fecha", text="Fecha", anchor="center")
+treeview_asistencia.heading("Hora Ingreso", text="Hora Ingreso", anchor="center")
+treeview_asistencia.heading("Hora Salida", text="Hora Salida", anchor="center")
+treeview_asistencia.heading("Estado", text="Estado", anchor="center")
+treeview_asistencia.heading("Motivo", text="Motivo", anchor="center")
+treeview_asistencia.heading("Horas Trabajadas", text="Horas Trabajadas", anchor="center")
+
+treeview_asistencia.column("#0", width=150, anchor="center")
+treeview_asistencia.column("Fecha", width=100, anchor="center")
+treeview_asistencia.column("Hora Ingreso", width=100, anchor="center")
+treeview_asistencia.column("Hora Salida", width=100, anchor="center")
+treeview_asistencia.column("Estado", width=100, anchor="center")
+treeview_asistencia.column("Motivo", width=130, anchor="center")
+treeview_asistencia.column("Horas Trabajadas", width=110, anchor="center")  # Ajustar ancho de la nueva columna
+
+treeview_asistencia.grid(row=3, column=0, columnspan=2, padx=5, pady=5)
+#Scrollbar
+scrollbar = ttk.Scrollbar(pestana_ver_asistencia, orient="vertical", command=treeview_asistencia.yview)
+scrollbar.grid(row=3, column=2, sticky='ns')  
+
+treeview_asistencia.configure(yscrollcommand=scrollbar.set)
+
+treeview_asistencia.grid(row=3, column=0, columnspan=2, padx=5, pady=5)
+
+boton_eliminar_asistencia = ttk.Button(pestana_ver_asistencia, text="Eliminar Asistencia", command=eliminar_asistencia)
+boton_eliminar_asistencia.grid(row=10, column=0, padx=2, pady=2)
+
+boton_actualizar_asistencia = ttk.Button(pestana_ver_asistencia, text="Actualizar Asistencia", command=actualizar_asistencia)
+boton_actualizar_asistencia.grid(row=10, column=1, padx=2, pady=2)
+
+from tkinter import filedialog
+
+# Funciones exportar asistencia pdf y xlsx
+# Función para abrir la ventana emergente de exportación
+def abrir_ventana_exportacion():
+    ventana_exportacion = tk.Toplevel()
+    ventana_exportacion.title("Exportar Desglose")
+    
+    # Selección de meses
+    frame_seleccion_meses = ttk.Frame(ventana_exportacion)
+    frame_seleccion_meses.grid(row=0, column=0, padx=2, pady=2)
+
+    meses_seleccionados2 = {}
+
+    for i in range(4):
+        for j in range(3):
+            mes = i * 3 + j + 1
+            if mes > 12:
+                break
+            var = tk.BooleanVar()
+            meses_seleccionados2[mes] = var
+            switch = ttk.Checkbutton(frame_seleccion_meses, text=f'Mes {mes}', variable=var, style="Switch.TCheckbutton")
+            switch.grid(row=i, column=j, padx=5, pady=5)
+
+    # Botones para exportar
+    boton_exportar_xlsx = ttk.Button(ventana_exportacion, text="Exportar a XLSX", command=lambda: exportar_a_xlsx(meses_seleccionados2))
+    boton_exportar_xlsx.grid(row=0, column=1, padx=2, pady=5)
+
+    boton_exportar_pdf = ttk.Button(ventana_exportacion, text="Exportar a PDF", command=lambda: exportar_a_pdf(meses_seleccionados2))
+    boton_exportar_pdf.grid(row=1, column=1, padx=2, pady=5)
+
+# Funciones exportar asistencia pdf y xlsx
+def exportar_a_pdf(meses_seleccionados):
+    try:
+        estudiante_id = entrada_id_ver_asistencia.get()
+        anio = int(selected_ano_ver_asistencia.get())
+    
+        cursor.execute("SELECT nombre FROM estudiantes WHERE id = ?", (estudiante_id,))
+        nombre_estudiante = cursor.fetchone()[0]  
+        
+        nombre_archivo = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")])
+        if not nombre_archivo:
+            return
+
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 12)
+
+        pdf.cell(0, 10, f"Registro de Asistencia para: {nombre_estudiante} (ID: {estudiante_id})", 0, 1, 'C')
+        pdf.cell(0, 10, f"Año: {anio}", 0, 1, 'C')
+        pdf.ln(10)
+        pdf.set_font("Arial", "B", 10)
+        
+        # Encabezados
+        pdf.cell(10, 10, 'Mes', 1)
+        pdf.cell(20, 10, 'Semana', 1)
+        pdf.cell(20, 10, 'Dia', 1)
+        pdf.cell(23, 10, 'Hora Ingreso', 1)
+        pdf.cell(23, 10, 'Hora Salida', 1)
+        pdf.cell(20, 10, 'Estado', 1)
+        pdf.cell(20, 10, 'Motivo', 1)
+        pdf.cell(20, 10, 'HorasTotal', 1)
+        pdf.ln()  
+
+        pdf.set_font("Arial", "", 10)  
+
+        for mes, var in meses_seleccionados.items():
+            if var.get(): 
+                cursor.execute(''' 
+                    SELECT semana, dia, hora_ingreso, hora_salida, estado, motivo, horas_trabajadas 
+                    FROM asistencia 
+                    WHERE estudiante_id = ? AND anio = ? AND mes = ? 
+                    ORDER BY semana, dia
+                ''', (estudiante_id, anio, mes))
+
+                registros = cursor.fetchall()
+
+                for registro in registros:
+                    semana, dia, hora_ingreso, hora_salida, estado, motivo, horas_trabajadas = registro
+                    pdf.cell(10, 10, str(mes), 1)  
+                    pdf.cell(20, 10, str(semana), 1) 
+                    pdf.cell(20, 10, str(dia), 1)
+                    pdf.cell(23, 10, str(hora_ingreso), 1)  
+                    pdf.cell(23, 10, str(hora_salida), 1)  
+                    pdf.cell(20, 10, estado, 1)  
+                    pdf.cell(20, 10, motivo, 1)
+                    pdf.cell(20, 10, horas_trabajadas, 1)  
+                    pdf.ln() 
+
+        pdf.output(nombre_archivo)  
+        messagebox.showinfo("Éxito", "Datos exportados a PDF exitosamente.")
+    
+    except Exception as e:
+        messagebox.showerror("Error", f"No se pudo exportar a PDF: {str(e)}")
+
+def exportar_a_xlsx(meses_seleccionados):
+    try:
+        estudiante_id = entrada_id_ver_asistencia.get()
+        anio = int(selected_ano_ver_asistencia.get())
+
+        cursor.execute("SELECT nombre FROM estudiantes WHERE id = ?", (estudiante_id,))
+        nombre_estudiante = cursor.fetchone()[0]  
+        
+        nombre_archivo = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
+        if not nombre_archivo: 
+            return
+
+        libro = Workbook()
+        hoja = libro.active
+        hoja.title = f"Registro {nombre_estudiante}"
+        encabezados = ["ID Estudiante", "Mes", "Semana", "Día", "Hora Ingreso", "Hora Salida", "Estado", "Motivo", "Horas Trabajadas"]
+        hoja.append(encabezados)
+
+        for mes, var in meses_seleccionados.items():
+            if var.get():  
+                cursor.execute(''' 
+                    SELECT semana, dia, hora_ingreso, hora_salida, estado, motivo, horas_trabajadas
+                    FROM asistencia 
+                    WHERE estudiante_id = ? AND anio = ? AND mes = ? 
+                    ORDER BY semana, dia
+                ''', (estudiante_id, anio, mes))
+
+                registros = cursor.fetchall()
+
+                for registro in registros:
+                    semana, dia, hora_ingreso, hora_salida, estado, motivo, horas_trabajadas = registro
+                    hoja.append([estudiante_id, mes, semana, dia, hora_ingreso, hora_salida, estado, motivo, horas_trabajadas])
+        
+        libro.save(nombre_archivo)
+        messagebox.showinfo("Éxito", "Datos exportados a XLSX exitosamente.")
+    
+    except Exception as e:
+        messagebox.showerror("Error", f"No se pudo exportar a XLSX: {str(e)}")
+
+# Botón para exportar desglose
+boton_exportar_desglose = ttk.Button(pestana_ver_asistencia, text="Exportar Desglose", command=abrir_ventana_exportacion)
+boton_exportar_desglose.grid(row=11, column=0, columnspan=2, pady=5)
+
+
+
+# --- Sección de Transferir Horas Acumuladas ---
+etiqueta_id_transferencia = tk.Label(pestana_ver_asistencia, text="ID Estudiante (Transferencia):")
+etiqueta_id_transferencia.grid(row=4, column=0, padx=5, pady=5)
+
+entrada_id_transferencia = ttk.Entry(pestana_ver_asistencia)  
+entrada_id_transferencia.grid(row=4, column=1, padx=5, pady=5)
+
+etiqueta_ano_transferencia = tk.Label(pestana_ver_asistencia, text="Año (Transferencia):")
+etiqueta_ano_transferencia.grid(row=5, column=0, padx=5, pady=5)
+
+selected_ano_transferencia = tk.StringVar(value='2024') 
+ano_combo_transferencia = ttk.Combobox(pestana_ver_asistencia, textvariable=selected_ano_transferencia, 
+                                        values=list(range(2020, 2031)), state='readonly') 
+ano_combo_transferencia.grid(row=5, column=1, padx=5, pady=5)
+
+etiqueta_semana_origen = tk.Label(pestana_ver_asistencia, text="Semana Origen:")
+etiqueta_semana_origen.grid(row=6, column=0, padx=5, pady=5)
+
+entrada_semana_origen = ttk.Entry(pestana_ver_asistencia)  
+entrada_semana_origen.grid(row=6, column=1, padx=5, pady=5)
+
+etiqueta_semana_destino = tk.Label(pestana_ver_asistencia, text="Semana Destino:")
+etiqueta_semana_destino.grid(row=7, column=0, padx=5, pady=5)
+
+entrada_semana_destino = ttk.Entry(pestana_ver_asistencia)  
+entrada_semana_destino.grid(row=7, column=1, padx=5, pady=5)
+
+etiqueta_horas_transferir = tk.Label(pestana_ver_asistencia, text="Horas a Transferir:")
+etiqueta_horas_transferir.grid(row=8, column=0, padx=5, pady=5)
+
+entrada_horas_transferir = ttk.Entry(pestana_ver_asistencia)  
+entrada_horas_transferir.grid(row=8, column=1, padx=5, pady=5)
+
+boton_transferir_horas = ttk.Button(pestana_ver_asistencia, text="Transferir Horas", command=transferir_horas)
+boton_transferir_horas.grid(row=9, column=0, columnspan=2, pady=5)
+
+
+
+# Asegúrate de que tu ventana principal sigue funcionando
+ventana.mainloop()
